@@ -39,7 +39,7 @@ jobs:
 
       - name: Set image name
         id: image
-        run: echo "name=${{ vars.DOCKERHUB_USERNAME }}/${{ env.DOCKERHUB_REPOSITORY }}:latest" >> $GITHUB_OUTPUT
+        run: echo "name=${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DOCKERHUB_REPOSITORY }}:latest" >> $GITHUB_OUTPUT
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
