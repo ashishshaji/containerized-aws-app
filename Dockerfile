@@ -12,5 +12,4 @@ USER appuser
 
 EXPOSE 8080
 
-# MaxRAMPercentage lets the JVM size its heap to the container's memory limit
 ENTRYPOINT ["java", "-jar", "app.jar"]
