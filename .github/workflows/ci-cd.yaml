@@ -11,7 +11,7 @@ env:
   APP_PORT: 8080
 
 jobs:
-  CI:
+  CI-build:
     runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.image.outputs.name }}
@@ -60,44 +60,90 @@ jobs:
           echo "🐳 Image pushed to Docker Hub: ${{ steps.image.outputs.name }}" >> $GITHUB_STEP_SUMMARY
           echo "🕒 Build Time: $(date)" >> $GITHUB_STEP_SUMMARY
 
-  # CD:
-  #   needs: CI
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - name: Deploy container on EC2
-  #       uses: appleboy/ssh-action@v1.0.3
-  #       env:
-  #         DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
-  #         DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-  #       with:
-  #         host: ${{ vars.VM_HOST }}
-  #         username: ${{ vars.VM_USER }}
-  #         key: ${{ secrets.VM_SSH_KEY }}
-  #         envs: DOCKERHUB_USERNAME,DOCKERHUB_TOKEN
-  #         script: |
-  #           # stop the old non-Docker Java process if it is still running on this port
-  #           pkill -f game2048-0.0.1-SNAPSHOT.jar || true
+  CD:
+    needs: CI-build
 
-  #           echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
-  #           docker pull ${{ needs.CI.outputs.image }}
+    runs-on: ubuntu-latest
+    env:
+      EC2_HOST: '3.94.163.95'
+    steps:
+      - name: Configure SSH key
+        env:
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          install -m 600 /dev/null key.pem
+          echo "$EC2_SSH_KEY" > key.pem
 
-  #           docker stop ${{ env.CONTAINER_NAME }} || true
-  #           docker rm ${{ env.CONTAINER_NAME }} || true
+      - name: Login to Docker Hub on EC2
+        env:
+          EC2_HOST: ${{ env.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          echo "$DOCKERHUB_TOKEN" | ssh -o StrictHostKeyChecking=no -i key.pem \
+            "$EC2_USER@$EC2_HOST" \
+            "docker login -u '$DOCKERHUB_USERNAME' --password-stdin"
 
-  #           docker run -d \
-  #             --name ${{ env.CONTAINER_NAME }} \
-  #             --restart unless-stopped \
-  #             -p ${{ env.APP_PORT }}:8080 \
-  #             ${{ needs.CI.outputs.image }}
+      - name: Stop existing containers on EC2
+        env:
+          EC2_HOST: ${{ env.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          ssh -o StrictHostKeyChecking=no -i key.pem "$EC2_USER@$EC2_HOST" \
+            bash -s -- "$CONTAINER_NAME" <<'EOF'
+          set -e
+          CONTAINER_NAME="$1"
 
-  #           sleep 10
-  #           if [ -z "$(docker ps -q -f name=${{ env.CONTAINER_NAME }})" ]; then
-  #             echo "Container failed to start:"
-  #             docker logs ${{ env.CONTAINER_NAME }}
-  #             exit 1
-  #           fi
-  #           echo "Container is running."
-  #           docker image prune -f
+          # Remove the previous container of this app, if any
+          docker rm -f "$CONTAINER_NAME" || true
+
+          # Stop any other container publishing port 8080
+          OTHERS=$(docker ps -q --filter "publish=8080")
+          if [ -n "$OTHERS" ]; then
+            echo "Stopping other containers on port 8080: $OTHERS"
+            docker stop $OTHERS
+            docker rm $OTHERS
+          fi
+          EOF
+
+      - name: Deploy new image on EC2
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          ssh -o StrictHostKeyChecking=no -i key.pem "$EC2_USER@$EC2_HOST" \
+            bash -s -- "$IMAGE" "${{ github.sha }}" "$CONTAINER_NAME" <<'EOF'
+          set -e
+          IMAGE="$1"; TAG="$2"; CONTAINER_NAME="$3"
+
+          docker pull "$IMAGE:$TAG"
+          docker run -d \
+            --name "$CONTAINER_NAME" \
+            --restart unless-stopped \
+            -p 8080:8080 \
+            "$IMAGE:$TAG"
+          docker image prune -f
+          EOF
+
+      - name: Health check
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          for i in $(seq 1 10); do
+            if curl -fs "http://$EC2_HOST:8080" > /dev/null; then
+              echo "App is up"
+              exit 0
+            fi
+            echo "Waiting for app... ($i/10)"
+            sleep 6
+          done
+          echo "Health check failed" >&2
+          exit 1
+
+      - name: Remove SSH key
+        if: always()
+        run: rm -f key.pem
 
   #     - name: Add deployment summary to GitHub Actions
   #       run: |
